@@ -88,7 +88,11 @@ entity pce_top is
 		VIDEO_VS		: out std_logic;
 		VIDEO_HS		: out std_logic;
 		VIDEO_HBL	: out std_logic;
-		VIDEO_VBL	: out std_logic
+		VIDEO_VBL	: out std_logic;
+
+				-- RetroAchievements RAM read port
+				RA_RAM_A		: in std_logic_vector(14 downto 0);
+				RA_RAM_DO		: out std_logic_vector(7 downto 0)
 	);
 end pce_top;
 
@@ -195,6 +199,7 @@ signal VRAM1_DO	: std_logic_vector(15 downto 0);
 signal VRAM1_WE	: std_logic;
 signal CLR_A	   : std_logic_vector(14 downto 0);
 signal CLR_WE		: std_logic;
+signal RAM_B_ADDR		: std_logic_vector(14 downto 0);
 signal VDC0_BORDER: std_logic;
 signal VDC0_GRID	: std_logic_vector(1 downto 0);
 signal CPU_PRE_RD	: std_logic;
@@ -613,6 +618,8 @@ port map (
 CPU_PRAM_SEL_N <= CPU_A(20) or not CPU_A(19) or not ROM_POP;
 
 
+RAM_B_ADDR <= CLR_A when CLR_WE = '1' else RA_RAM_A;
+
 RAM : entity work.dpram generic map (15,8)
 port map (
 	clock		=> CLK,
@@ -621,9 +628,10 @@ port map (
 	wren_a	=> CPU_CE and not CPU_RAM_SEL_N and not CPU_WR_N,
 	q_a		=> RAM_DO,
 
-	address_b=> CLR_A,
+	address_b=> RAM_B_ADDR,
 	data_b	=> (others => '0'),
-	wren_b	=> CLR_WE
+	wren_b	=> CLR_WE,
+	q_b		=> RA_RAM_DO
 );
 
 RAM_A(12 downto 0)  <= CPU_A(12 downto 0);

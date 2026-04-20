@@ -192,7 +192,7 @@ assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
 assign LED_USER  = cart_download | bk_state | bk_pending;
-assign LED_DISK  = 0;
+assign LED_DISK  = {1'b1, ra_active};
 assign LED_POWER = 0;
 assign BUTTONS   = osd_btn;
 assign VGA_SCALER  = 0;
@@ -534,7 +534,11 @@ pce_top #(LITE) pce_top
 	.VIDEO_VS(vs),
 	.VIDEO_HS(hs),
 	.VIDEO_HBL(hbl),
-	.VIDEO_VBL(vbl)
+	.VIDEO_VBL(vbl),
+
+	// RetroAchievements RAM read port
+	.RA_RAM_A(ra_wram_addr),
+	.RA_RAM_DO(ra_wram_dout)
 );
 
 
@@ -888,6 +892,18 @@ ddram ddram
 (
 	.*,
 	.clkref(ce_rom),
+
+	// RetroAchievements DDRAM channel
+	.ra_wr_addr(ra_ddram_wr_addr),
+	.ra_wr_din(ra_ddram_wr_din),
+	.ra_wr_be(ra_ddram_wr_be),
+	.ra_wr_req(ra_ddram_wr_req),
+	.ra_wr_ack(ra_ddram_wr_ack),
+	.ra_rd_addr(ra_ddram_rd_addr),
+	.ra_rd_req(ra_ddram_rd_req),
+	.ra_rd_ack(ra_ddram_rd_ack),
+	.ra_rd_dout(ra_ddram_rd_dout),
+
 
 	.wraddr(cart_download ? romwr_a : {3'b001,cd_ram_a}),
 	.din(cart_download ? romwr_d : {cd_ram_do,cd_ram_do}),
@@ -1384,5 +1400,53 @@ wire CDDA_EN = 1;
 wire ADPCM_EN = 1;
 
 `endif
+
+////////////////////////////  RETROACHIEVEMENTS  ///////////////////////////
+
+// RA Work RAM BRAM read interface
+wire [14:0] ra_wram_addr;
+wire  [7:0] ra_wram_dout;
+
+// RA DDRAM interface (toggle-based)
+wire [28:0] ra_ddram_wr_addr;
+wire [63:0] ra_ddram_wr_din;
+wire  [7:0] ra_ddram_wr_be;
+wire        ra_ddram_wr_req;
+wire        ra_ddram_wr_ack;
+wire [28:0] ra_ddram_rd_addr;
+wire        ra_ddram_rd_req;
+wire        ra_ddram_rd_ack;
+wire [63:0] ra_ddram_rd_dout;
+wire        ra_active;
+
+ra_ram_mirror_tgfx16 ra_mirror
+(
+	.clk(clk_sys),
+	.reset(reset | cart_download),
+	.vblank(vbl),
+
+	// Work RAM BRAM read
+	.wram_addr(ra_wram_addr),
+	.wram_dout(ra_wram_dout),
+
+	// CD mode
+	.cd_en(cd_en),
+	.use_sdr(use_sdr),
+
+	// DDRAM interface (toggle-based, via ddram arbiter)
+	.ddram_wr_addr(ra_ddram_wr_addr),
+	.ddram_wr_din(ra_ddram_wr_din),
+	.ddram_wr_be(ra_ddram_wr_be),
+	.ddram_wr_req(ra_ddram_wr_req),
+	.ddram_wr_ack(ra_ddram_wr_ack),
+	.ddram_rd_addr(ra_ddram_rd_addr),
+	.ddram_rd_req(ra_ddram_rd_req),
+	.ddram_rd_ack(ra_ddram_rd_ack),
+	.ddram_rd_dout(ra_ddram_rd_dout),
+
+	// Status
+	.active(ra_active),
+	.dbg_frame_counter()
+);
 
 endmodule
