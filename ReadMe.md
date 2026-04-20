@@ -1,4 +1,135 @@
-# [TurboGrafx 16 / PC Engine](https://en.wikipedia.org/wiki/TurboGrafx-16) for [MiSTer Platform](https://github.com/MiSTer-devel/Main_MiSTer/wiki) 
+# TurboGrafx16_MiSTer — RetroAchievements Fork
+
+This is a fork of the official [TurboGrafx-16 / PC Engine core for MiSTer](https://github.com/MiSTer-devel/TurboGrafx16_MiSTer) with modifications to support **RetroAchievements** on MiSTer FPGA.
+
+> **Status:** Experimental / Proof of Concept — works together with the [modified Main_MiSTer binary](https://github.com/odelot/Main_MiSTer).
+
+## What's Different from the Original
+
+The upstream TurboGrafx-16 core is an FPGA PC Engine / TurboGrafx-16 implementation supporting HuCard, CD-ROM, Super CD-ROM, Arcade Card, and SuperGrafx modes. This fork adds one new module and modifies several existing files so the ARM side (Main_MiSTer) can read emulated RAM for achievement evaluation. **No emulation logic was changed** — the core plays games identically to the original.
+
+### Added Files
+
+| File | Purpose |
+|------|--------|
+| `rtl/ra_ram_mirror_tgfx16.sv` | Option C selective-address mirror — reads Work RAM from BRAM Port B, CD RAM and Super CD RAM from DDRAM, writes cached values back to DDRAM for the ARM CPU |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `TurboGrafx16.sv` | Instantiates `ra_ram_mirror_tgfx16`, declares RA signal wiring, passes `cd_en` and `use_sdr` flags for CD mode detection |
+| `rtl/ddram.sv` | Adds an RA arbiter channel — secondary priority behind the core, one transaction per idle cycle |
+| `rtl/pce_top.vhd` | Exposes Work RAM via BRAM Port B (`RA_RAM_A` address input, `RA_RAM_DO` data output) |
+| `files.qip` | Adds `ra_ram_mirror_tgfx16.sv` to the Quartus project |
+
+### How the RAM Mirror Works
+
+The TurboGrafx-16 has a relatively small CPU Work RAM (8 KB) but CD-ROM and Super CD-ROM modes add significantly more. The core uses the **selective address protocol (Option C)**, the same approach used for SNES, Genesis, and other cores:
+
+1. The **ARM binary** writes a list of RAM addresses it needs to DDRAM offset `0x40000` (up to 4096 addresses per frame).
+2. On each **VBlank**, the FPGA module dispatches each address to the correct memory backend:
+   - **Work RAM** (0x000000–0x001FFF): Read from BRAM Port B of `pce_top` — 1-cycle synchronous read, direct byte access.
+   - **CD RAM** (0x002000–0x011FFF): Read from DDRAM at offset 0x0600000 — 64-bit word access with byte extraction.
+   - **Super CD RAM** (0x012000–0x041FFF): Read from DDRAM at offset 0x0610000 — same 64-bit word access with byte extraction.
+3. Values are packed into 8-byte chunks and written to DDRAM offset `0x48000`, with a response counter so the ARM knows the data is ready.
+4. The ARM binary reads the values and feeds them to the rcheevos achievement engine.
+
+**Memory regions exposed:**
+
+| Region | Address Range | Size | Source | Description |
+|--------|-------------|------|--------|-------------|
+| Work RAM | $000000–$001FFF | 8 KB | BRAM Port B | CPU Work RAM (always available) |
+| CD RAM | $002000–$011FFF | 64 KB | DDRAM | CD-ROM system RAM (CD/SCD titles) |
+| Super CD RAM | $012000–$041FFF | 192 KB | DDRAM | Super CD-ROM extra RAM (SCD titles) |
+
+**Total exposed: up to 264 KB** (8 KB for HuCard-only games, 264 KB for Super CD-ROM titles)
+
+### Key Differences from Other Cores
+
+| Aspect | PC Engine / TG16 | Genesis |
+|--------|-----------------|--------|
+| Console ID | 8 (HuCard) / 76 (CD-ROM) | 1 |
+| RAM size | 8–264 KB | 64 KB |
+| Work RAM access | BRAM Port B (1-cycle) | BRAM (bit-13 inversion) |
+| CD/SCD access | DDRAM word-aligned + byte extract | N/A |
+| DDRAM integration | Arbiter in `ddram.sv` (secondary priority) | Separate `ddram_arb_md.sv` |
+| Game formats | HuCard ROM + CD-ROM (CUE/BIN, CHD, CCD) | ROM cartridge only |
+| Clock | clk_sys ~21.477 MHz | clk_sys |
+
+### DDRAM Layout
+
+```
+0x00000   Header:   magic ("RACH") + flags (busy bit) + frame counter
+0x00010   Debug1:   FPGA version + dispatch/ok/timeout counters
+0x00018   Debug2:   first_addr + wram/cdram/max_timeout counters
+0x40000   AddrReq:  ARM → FPGA address request list (count + request_id + addresses)
+0x48000   ValResp:  FPGA → ARM value response cache (response_id + response_frame + values)
+```
+
+All data flows through shared DDRAM at ARM physical address **0x3D000000**.
+
+### HuCard and CD-ROM Support
+
+The same handler supports both HuCard cartridge games and CD-ROM/Super CD-ROM disc games:
+- **HuCard**: Console ID 8 (`RC_CONSOLE_PC_ENGINE`). ROM is hashed as MD5, skipping an optional 512-byte copier header.
+- **CD-ROM**: Console ID 76 (`RC_CONSOLE_PC_ENGINE_CD`). Disc is hashed via `rc_hash_generate_from_file()` from the rcheevos library, which handles `.cue+.bin`, `.chd`, `.ccd`, `.iso`, and `.img` formats.
+
+The FPGA mirror automatically uses CD/SCD RAM regions when a CD game is loaded (controlled by the `cd_en` flag wired from the core).
+
+### Architecture Diagram
+
+```
+┌───────────────────────────────────────┐
+│       TG16 / PCE FPGA Core            │
+│                                       │
+│  Work RAM (8KB)   in BRAM             │
+│  CD RAM (64KB)    in DDRAM            │
+│  SCD RAM (192KB)  in DDRAM            │
+└─────────────┬─────────────────────────┘
+              │  VBlank
+              ▼
+┌───────────────────────────────────────┐
+│     ra_ram_mirror_tgfx16.sv          │
+│  Work RAM: BRAM Port B (1-cycle)      │
+│  CD/SCD RAM: DDRAM word + byte sel    │
+│  Arbiter: secondary priority in ddram │
+│  Writes header + values to DDRAM      │
+└─────────────┬─────────────────────────┘
+              │  DDRAM @ 0x3D000000
+              ▼
+┌───────────────────────────────────────┐
+│     Main_MiSTer (ARM binary)          │
+│  mmap /dev/mem → reads mirror         │
+│  Writes address list → reads values   │
+│  rcheevos hashes ROM/disc + evaluates │
+└───────────────────────────────────────┘
+```
+
+## How to Try It
+
+1. Download the latest TurboGrafx-16 core binary (`TurboGrafx16_*.rbf`) from the [Releases](https://github.com/odelot/TurboGrafx16_MiSTer/releases) page.
+2. Copy the `.rbf` file to `/media/fat/_Console/` on your MiSTer SD card (replacing or alongside the stock TurboGrafx-16 core).
+3. You will also need the **modified Main_MiSTer binary** from [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer) — follow the setup instructions there to configure your RetroAchievements credentials.
+4. Reboot your MiSTer, load the TurboGrafx-16 core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
+
+## Building from Source
+
+Open the project in Quartus Prime (use the same version as the upstream MiSTer TurboGrafx-16 core) and compile. The `ra_ram_mirror_tgfx16.sv` file is already included in `files.qip`.
+
+## Links
+
+- Original TurboGrafx-16 core: [MiSTer-devel/TurboGrafx16_MiSTer](https://github.com/MiSTer-devel/TurboGrafx16_MiSTer)
+- Modified Main binary (required): [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer)
+- RetroAchievements: [retroachievements.org](https://retroachievements.org/)
+
+---
+
+# Original TurboGrafx-16 Core Documentation
+
+*Everything below is from the upstream [TurboGrafx16_MiSTer](https://github.com/MiSTer-devel/TurboGrafx16_MiSTer) README and applies unchanged to this fork.*
+
+## [TurboGrafx 16 / PC Engine](https://en.wikipedia.org/wiki/TurboGrafx-16) for [MiSTer Platform](https://github.com/MiSTer-devel/Main_MiSTer/wiki) 
 
 ### This is the port of Gregory Estrade's [FPGAPCE](https://github.com/Torlus/FPGAPCE)
 
